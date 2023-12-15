@@ -1,0 +1,239 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Dec 15 12:38:23 2023
+
+@author: gwend
+"""
+
+import numpy as np
+import re
+import json
+import random
+from itertools import combinations
+import pandas as pd
+from scipy.cluster.hierarchy import linkage, fcluster, dendrogram
+import matplotlib.pyplot as plt
+from collections import Counter
+from datasketch import MinHash, MinHashLSH
+from sklearn.cluster import KMeans
+
+# All functions
+# Minhash function
+def minhash(binary_matrix, num_permutations):
+    num_products = binary_matrix.shape[1]
+    num_elements = binary_matrix.shape[0]
+    
+    # Initialize signature matrix
+    signature_matrix = np.full((num_permutations, num_products), np.inf)
+
+    permutation = []
+    for i in range(num_permutations):
+        permutation.append(list(np.random.permutation(num_elements)))  
+    for i in range(num_permutations):
+        for j in range(num_elements):
+            for product in range(num_products):
+                if binary_matrix[permutation[i][j] - 1, product] == 1:
+                    if np.isinf(signature_matrix[i][product]):
+                        signature_matrix[i][product] = j + 1
+    return signature_matrix
+
+# LSH function
+def lsh(signature_matrix, num_bands):
+    n = signature_matrix.shape[0]
+    band_size = n // num_bands
+    buckets = {}
+    candidate_pairs = set()
+    for band in range(num_bands):
+        start_row = band * band_size
+        end_row = start_row + band_size
+        for product in range(signature_matrix.shape[1]):
+            hash_value = tuple(signature_matrix[start_row:end_row, product])
+            if hash_value in buckets:
+                buckets[hash_value].append(product + 1)
+            else:
+                buckets[hash_value] = [product + 1]
+        for _, bucket in buckets.items():
+            if len(bucket) > 1:
+                candidate_pairs.update((pair[0], pair[1]) for pair in combinations(bucket, 2))
+        buckets = {}
+    return list(candidate_pairs)
+
+def similarity(set1, set2):
+    one1 = np.sum(set1 == 1)
+    one2 = np.sum(set2 == 1)
+    
+    both1 = np.sum((set1 == 1) & (set2 == 1))
+
+    similarity = both1 / (one1 + one2 - both1) if (one1 + one2 - both1) != 0 else 0.0
+    return similarity
+
+def count_pairs(n):
+    return n * (n - 1) // 2
+
+
+
+
+
+
+
+
+
+
+# Load data
+path = r'C:\Users\gwend\OneDrive\Documents\University\Master\Computer Science\Paper\TVs-all-merged.json'
+
+with open(path, 'r') as file:
+    data = json.load(file)
+
+
+# Train to decide optimal hyperparameters
+F1_measure = {num_bands: 0 for num_bands in range(100, 1100, 100)}
+pair_quality_measure = {num_bands: 0 for num_bands in range(100, 1100, 100)}
+pair_completeness_measure = {num_bands: 0 for num_bands in range(100, 1100, 100)}
+
+
+for bootstrap in range(5):
+    print(bootstrap)
+    path = r'C:\Users\gwend\OneDrive\Documents\University\Master\Computer Science\Paper\TVs-all-merged.json'
+
+    with open(path, 'r') as file:
+        data = json.load(file)
+    #select 1000 random rows
+    data = list(data.items())
+
+    # Randomly sample 1000 entries
+    data = random.sample(data, k=1000)
+
+    # Convert the sampled list back to a dictionary
+    data = dict(data) 
+    # Define regex
+    pattern = re.compile(r'[a-zA-Z0-9]*(([0-9]+[^0-9, ]+)|([^0-9, ]+[0-9]+))[a-zA-Z0-9]*', re.IGNORECASE)
+
+
+    titles = [product["title"] for key, values in data.items() for product in values]
+    
+    total_duplicates = sum(len(products) == 2 for products in data.values())
+
+    # Create vector with matching words
+    model_words = []
+
+    # Create arrays with things to be searched for in title
+    replace_inch = ['Inch', 'inches', '”', '-inch', ' inch', 'inch']
+    replace_hz = ['Hertz', 'hertz', 'Hz', 'HZ', ' hz', '-hz', 'hz']
+    brands = ['philips', 'supersonic', 'sharp', 'samsung', 'nec', 'tcl', 'toshiba', 'hisense', 'sony', 'lg', 'sanyo', 'coby', 'panasonic', 'rca', 'vizio', 'naxa', 'sansui', 'coby', 'viewsonic', 'avue', 'insignia', 'sunbritetv', 'magnavox', 'sanyo', 'jvc', 'haier', 'optoma', 'proscan', 'venturer', 'jvc', 'rca', 'westinghouse', 'pyle', 'dynex', 'magnavox', 'sceptre', 'tcl', 'mitsubishi', 'dynex']
+
+    # Extract model words
+    for title in titles:
+        for segment in replace_inch:
+            title = title.replace(segment, 'inch')
+        for segment in replace_hz:
+            title = title.replace(segment, 'hz')
+        title = title.lower()
+        for brand in brands:
+            if brand.lower() in title:
+                model_words.append(brand)
+        match = pattern.search(title)
+        if match:
+            matchedText = match.group()
+            words = re.findall(r'\b\w+\b', matchedText)
+            model_words.extend(words)
+    model_words = list(set(model_words))
+
+    # Compute binary matrix based on model words
+    binary_matrix = np.zeros((len(model_words), len(titles)))
+    for i in range(len(model_words)):
+        for j in range(len(titles)):
+            if model_words[i] in titles[j].lower():
+                binary_matrix[i][j] = 1
+
+
+    # Perform Minhashing
+    permutations = 200  # Adjust as needed
+    signature_matrix = minhash(binary_matrix, permutations)
+
+    # Perform LSH
+    
+    for num_bands in range(10, 150, 5):
+        print(num_bands)
+        candidate_pairs = lsh(signature_matrix, num_bands)
+        
+        num_products = binary_matrix.shape[1]
+        dissimilarity_matrix = np.full((num_products, num_products), np.inf)
+        for pair in candidate_pairs:
+            dissimilarity_matrix[pair[0] - 1, pair[1] -1] = 0
+            dissimilarity_matrix[pair[1] - 1, pair[0] -1] = 0
+        
+        inf_indices = np.where(np.isinf(dissimilarity_matrix))
+        for row, col in zip(*inf_indices):
+            dissimilarity_matrix[row, col] = 1 - similarity(binary_matrix[:, row], binary_matrix[:, col])
+            dissimilarity_matrix[col, row] = 1 - similarity(binary_matrix[:, col], binary_matrix[:, row])
+            
+
+        # Perform hierarchical clustering
+        linkage_matrix = linkage(dissimilarity_matrix, method='complete')
+        clusters = fcluster(linkage_matrix, t = 0.7, criterion='distance')
+    
+        cluster_counts = Counter(clusters)
+
+        duplicates = 0
+        for cluster, count in cluster_counts.items():       
+            if count > 1:
+                duplicates = duplicates + count_pairs(count)
+     
+        pair_quality = (duplicates)/len(candidate_pairs)
+        pair_completeness = (duplicates)/total_duplicates
+        F1_star = (2 * pair_quality*pair_completeness)/(pair_quality + pair_completeness)
+        print("Bands: " , num_bands , ", Evaluation: " , pair_quality, pair_completeness, F1_star)
+        F1_measure[num_bands] = F1_star
+        pair_completeness_measure[num_bands] = pair_completeness
+        pair_quality_measure[num_bands] = pair_quality
+    
+    
+# Calculate average of measures
+for bands in F1_measure:
+    F1_measure[bands] /= 5
+    
+for bands in pair_quality_measure:
+    pair_quality_measure[bands] /= 5
+
+for bands in pair_completeness_measure:
+    pair_completeness_measure[bands] /= 5
+
+# Optimal number of bands
+optimal_bands = max(F1_measure, key=F1_measure.get)
+
+
+# Make plots
+# F1
+keys = list(F1_measure.keys())
+values = list(F1_measure.values())
+
+plt.plot(keys, values, marker='o', linestyle='-')
+plt.xlabel('Bands')
+plt.ylabel('F1-Measure')
+
+
+# Pair completeness
+keys = list(pair_completeness_measure.keys())
+values = list(pair_completeness_measure.values())
+
+
+plt.plot(keys, values, marker='o', linestyle='-')
+plt.xlabel('Bands')
+plt.ylabel('Pair completeness')
+
+# Show the graph
+plt.show()
+
+# Pair quality
+keys = list(pair_quality_measure.keys())
+values = list(pair_quality_measure.values())
+
+
+plt.plot(keys, values, marker='o', linestyle='-')
+plt.xlabel('Bands')
+plt.ylabel('Pair quality')
+
+# Show the graph
+plt.show()
+
